@@ -25,6 +25,9 @@ public final class RastPlugin extends JavaPlugin implements Listener {
     private final Map<UUID, BukkitTask> brandChecks = new ConcurrentHashMap<>();
     private final Map<UUID, PlayerState> horizonPlayers = new ConcurrentHashMap<>();
     private BukkitTask performanceTask;
+    private boolean resourcePressure;
+    private int pressureSamples;
+    private int recoverySamples;
 
     @Override
     public void onEnable() {
@@ -124,11 +127,58 @@ public final class RastPlugin extends JavaPlugin implements Listener {
         if (!isOptimizationEnabled()) {
             return;
         }
+        updateResourcePressure();
         for (Player player : Bukkit.getOnlinePlayers()) {
             if (horizonPlayers.containsKey(player.getUniqueId())) {
                 applyCurrentProfile(player, false);
             }
         }
+    }
+
+    private void updateResourcePressure() {
+        if (!isAdaptiveModeEnabled()) {
+            resourcePressure = false;
+            pressureSamples = 0;
+            recoverySamples = 0;
+            return;
+        }
+
+        if (isResourcePressureDetected()) {
+            pressureSamples++;
+            recoverySamples = 0;
+            if (!resourcePressure && pressureSamples >= requiredSamples()) {
+                resourcePressure = true;
+                getLogger().warning("Resource pressure detected; reduced Horizon-only chunk profile enabled.");
+            }
+        } else {
+            recoverySamples++;
+            pressureSamples = 0;
+            if (resourcePressure && recoverySamples >= requiredSamples()) {
+                resourcePressure = false;
+                getLogger().info("Server resources recovered; normal Horizon-only chunk profile restored.");
+            }
+        }
+    }
+
+    private boolean isResourcePressureDetected() {
+        double tpsThreshold = getConfig().getDouble(
+                "horizon-optimization.adaptive.tps-threshold", 18.0);
+        double memoryThreshold = getConfig().getDouble(
+                "horizon-optimization.adaptive.max-heap-usage", 0.88);
+        double[] tps = Bukkit.getTPS();
+        boolean lowTps = tps.length > 0 && tps[0] < tpsThreshold;
+
+        Runtime runtime = Runtime.getRuntime();
+        long maxHeap = runtime.maxMemory();
+        long usedHeap = runtime.totalMemory() - runtime.freeMemory();
+        double heapUsage = maxHeap <= 0 ? 0.0 : (double) usedHeap / maxHeap;
+        boolean highMemory = heapUsage >= Math.max(0.50, Math.min(0.99, memoryThreshold));
+        return lowTps || highMemory;
+    }
+
+    private int requiredSamples() {
+        return clamp(getConfig().getInt(
+                "horizon-optimization.adaptive.stable-checks", 3), 1, 12);
     }
 
     private void applyCurrentProfile(Player player, boolean force) {
@@ -137,8 +187,7 @@ public final class RastPlugin extends JavaPlugin implements Listener {
         }
 
         UUID id = player.getUniqueId();
-        boolean underLoad = isAdaptiveModeEnabled() && isServerUnderLoad();
-        String profileName = underLoad ? "low-tps" : "normal";
+        String profileName = isAdaptiveModeEnabled() && resourcePressure ? "low-tps" : "normal";
         AppliedProfile profile = readProfile(profileName);
         PlayerState state = horizonPlayers.get(id);
 
@@ -156,11 +205,6 @@ public final class RastPlugin extends JavaPlugin implements Listener {
         player.setSendViewDistance(profile.sendViewDistance());
         player.setSimulationDistance(profile.simulationDistance());
         horizonPlayers.put(id, new PlayerState(state.original(), profile));
-
-        if (force) {
-            getLogger().fine("Applied " + profileName + " Horizon chunk profile to "
-                    + player.getName() + ".");
-        }
     }
 
     private void restoreAllProfiles() {
@@ -179,13 +223,6 @@ public final class RastPlugin extends JavaPlugin implements Listener {
 
     private boolean isAdaptiveModeEnabled() {
         return getConfig().getBoolean("horizon-optimization.adaptive.enabled", true);
-    }
-
-    private boolean isServerUnderLoad() {
-        double threshold = getConfig().getDouble(
-                "horizon-optimization.adaptive.tps-threshold", 18.0);
-        double[] tps = Bukkit.getTPS();
-        return tps.length > 0 && tps[0] < threshold;
     }
 
     private AppliedProfile readProfile(String name) {
@@ -218,6 +255,9 @@ public final class RastPlugin extends JavaPlugin implements Listener {
         if (args.length == 1 && args[0].equalsIgnoreCase("reload")) {
             restoreAllProfiles();
             reloadConfig();
+            resourcePressure = false;
+            pressureSamples = 0;
+            recoverySamples = 0;
             for (Player player : Bukkit.getOnlinePlayers()) {
                 beginBrandDetection(player);
             }
@@ -225,11 +265,18 @@ public final class RastPlugin extends JavaPlugin implements Listener {
             return true;
         }
         if (args.length == 1 && args[0].equalsIgnoreCase("status")) {
-            sender.sendMessage("§6Rast §7| §fHorizon-профили: "
-                    + (isOptimizationEnabled() ? "§aвключены" : "§cвыключены")
-                    + " §7| §fраспознано игроков: §b" + horizonPlayers.size());
-            sender.sendMessage("§7TPS (1 мин): §f" + String.format(Locale.ROOT, "%.2f",
-                    Bukkit.getTPS()[0]));
+            double[] tps = Bukkit.getTPS();
+            double oneMinuteTps = tps.length == 0 ? 20.0 : tps[0];
+            Runtime runtime = Runtime.getRuntime();
+            long used = runtime.totalMemory() - runtime.freeMemory();
+            long max = runtime.maxMemory();
+            double heapPercent = max <= 0 ? 0.0 : used * 100.0 / max;
+            sender.sendMessage("§6Rast §7| §fHorizon: "
+                    + (isOptimizationEnabled() ? "§aвключён" : "§cвыключен")
+                    + " §7| §fигроков: §b" + horizonPlayers.size());
+            sender.sendMessage("§7TPS (1 мин): §f" + String.format(Locale.ROOT, "%.2f", oneMinuteTps)
+                    + " §7| Heap: §f" + String.format(Locale.ROOT, "%.1f%%", heapPercent)
+                    + " §7| Профиль: " + (resourcePressure ? "§eсниженный" : "§aобычный"));
             return true;
         }
         sender.sendMessage("§eИспользование: /rast reload §7или §e/rast status");
