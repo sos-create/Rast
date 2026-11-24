@@ -18,22 +18,24 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
+import java.util.Objects;
 
 public final class RastPlugin extends JavaPlugin {
     private BukkitTask mergeTask;
     private long totalMerged;
     private long lastPassMerged;
     private int lastPassComparisons;
+    private int lastPassChunks;
+    private int chunkCursor;
 
     @Override
     public void onEnable() {
         saveDefaultConfig();
         startMergeTask();
-
         if (getConfig().getBoolean("diagnostics.log-startup-summary", true)) {
-            getLogger().info("Rast enabled. Paper " + Bukkit.getBukkitVersion()
-                    + "; safe item merging: "
-                    + getConfig().getBoolean("item-merge.enabled", true));
+            getLogger().info("Rast enabled on " + Bukkit.getBukkitVersion()
+                    + "; item merging=" + getConfig().getBoolean("item-merge.enabled", true));
         }
     }
 
@@ -50,11 +52,9 @@ public final class RastPlugin extends JavaPlugin {
             mergeTask.cancel();
             mergeTask = null;
         }
-
         if (!getConfig().getBoolean("item-merge.enabled", true)) {
             return;
         }
-
         long interval = Math.max(20L, getConfig().getLong("item-merge.interval-ticks", 40L));
         mergeTask = Bukkit.getScheduler().runTaskTimer(this, this::mergeLoadedItems, interval, interval);
     }
@@ -65,96 +65,139 @@ public final class RastPlugin extends JavaPlugin {
         double radiusSquared = radius * radius;
         int comparisonBudget = Math.max(100, getConfig().getInt(
                 "item-merge.max-comparisons-per-chunk", 1200));
+        int chunkBudget = Math.max(1, getConfig().getInt("item-merge.max-chunks-per-pass", 32));
         Set<String> disabledWorlds = new HashSet<>(
                 getConfig().getStringList("item-merge.disabled-worlds"));
 
-        long mergedThisPass = 0;
-        int comparisonsThisPass = 0;
-
+        List<Chunk> loaded = new ArrayList<>();
         for (World world : Bukkit.getWorlds()) {
             if (disabledWorlds.contains(world.getName())) {
                 continue;
             }
-
             for (Chunk chunk : world.getLoadedChunks()) {
-                List<Item> items = new ArrayList<>();
-                for (Entity entity : chunk.getEntities()) {
-                    if (entity instanceof Item item && item.isValid() && !item.isDead()) {
-                        items.add(item);
-                    }
+                loaded.add(chunk);
+            }
+        }
+
+        if (loaded.isEmpty()) {
+            lastPassMerged = 0;
+            lastPassComparisons = 0;
+            lastPassChunks = 0;
+            chunkCursor = 0;
+            return;
+        }
+
+        int start = Math.floorMod(chunkCursor, loaded.size());
+        int count = Math.min(chunkBudget, loaded.size());
+        long mergedThisPass = 0;
+        int comparisonsThisPass = 0;
+
+        for (int offset = 0; offset < count; offset++) {
+            Chunk chunk = loaded.get((start + offset) % loaded.size());
+            List<Item> items = new ArrayList<>();
+            for (Entity entity : chunk.getEntities()) {
+                if (entity instanceof Item item && item.isValid() && !item.isDead()) {
+                    items.add(item);
                 }
-                if (items.size() < 2) {
+            }
+            if (items.size() < 2) {
+                continue;
+            }
+
+            Map<Cell, List<Item>> cells = new HashMap<>();
+            for (Item item : items) {
+                Cell cell = cellFor(item, radius);
+                cells.computeIfAbsent(cell, ignored -> new ArrayList<>()).add(item);
+            }
+
+            int comparisons = 0;
+            outer:
+            for (Item source : items) {
+                if (!source.isValid() || source.isDead()) {
                     continue;
                 }
+                Cell cell = cellFor(source, radius);
 
-                Map<Cell, List<Item>> cells = new HashMap<>();
-                for (Item item : items) {
-                    Cell cell = new Cell(
-                            (int) Math.floor(item.getLocation().getX() / radius),
-                            (int) Math.floor(item.getLocation().getZ() / radius));
-                    cells.computeIfAbsent(cell, ignored -> new ArrayList<>()).add(item);
-                }
+                for (int dx = -1; dx <= 1; dx++) {
+                    for (int dz = -1; dz <= 1; dz++) {
+                        List<Item> nearby = cells.get(new Cell(cell.x + dx, cell.z + dz));
+                        if (nearby == null) {
+                            continue;
+                        }
 
-                int comparisons = 0;
-                outer:
-                for (Item source : items) {
-                    if (!source.isValid() || source.isDead()) {
-                        continue;
-                    }
-
-                    int cellX = (int) Math.floor(source.getLocation().getX() / radius);
-                    int cellZ = (int) Math.floor(source.getLocation().getZ() / radius);
-
-                    for (int dx = -1; dx <= 1; dx++) {
-                        for (int dz = -1; dz <= 1; dz++) {
-                            List<Item> nearby = cells.get(new Cell(cellX + dx, cellZ + dz));
-                            if (nearby == null) {
+                        for (Item target : nearby) {
+                            if (source == target || !target.isValid() || target.isDead()
+                                    || source.getEntityId() >= target.getEntityId()) {
                                 continue;
                             }
 
-                            for (Item target : nearby) {
-                                if (source == target || !target.isValid() || target.isDead()
-                                        || source.getEntityId() >= target.getEntityId()) {
-                                    continue;
-                                }
+                            comparisons++;
+                            if (comparisons > comparisonBudget) {
+                                break outer;
+                            }
 
-                                comparisons++;
-                                if (comparisons >= comparisonBudget) {
-                                    break outer;
-                                }
+                            if (source.getLocation().distanceSquared(target.getLocation()) > radiusSquared
+                                    || !samePickupRules(source, target)) {
+                                continue;
+                            }
 
-                                if (source.getWorld() != target.getWorld()
-                                        || source.getLocation().distanceSquared(target.getLocation()) > radiusSquared) {
-                                    continue;
-                                }
+                            ItemStack sourceStack = source.getItemStack();
+                            ItemStack targetStack = target.getItemStack();
+                            if (!sourceStack.isSimilar(targetStack)) {
+                                continue;
+                            }
 
-                                ItemStack sourceStack = source.getItemStack();
-                                ItemStack targetStack = target.getItemStack();
-                                if (!sourceStack.isSimilar(targetStack)) {
-                                    continue;
-                                }
+                            int capacity = targetStack.getMaxStackSize() - targetStack.getAmount();
+                            if (capacity <= 0) {
+                                continue;
+                            }
 
-                                int combined = sourceStack.getAmount() + targetStack.getAmount();
-                                if (combined > targetStack.getMaxStackSize()) {
-                                    continue;
-                                }
+                            int moved = Math.min(capacity, sourceStack.getAmount());
+                            if (moved <= 0) {
+                                continue;
+                            }
 
-                                targetStack.setAmount(combined);
-                                target.setItemStack(targetStack);
-                                target.setPickupDelay(Math.min(source.getPickupDelay(), target.getPickupDelay()));
+                            targetStack.setAmount(targetStack.getAmount() + moved);
+                            target.setItemStack(targetStack);
+                            sourceStack.setAmount(sourceStack.getAmount() - moved);
+
+                            int delay = Math.max(source.getPickupDelay(), target.getPickupDelay());
+                            target.setPickupDelay(delay);
+
+                            if (sourceStack.getAmount() <= 0) {
                                 source.remove();
                                 mergedThisPass++;
+                                break;
+                            } else {
+                                source.setItemStack(sourceStack);
                             }
                         }
                     }
                 }
-                comparisonsThisPass += comparisons;
             }
+            comparisonsThisPass += comparisons;
         }
 
+        chunkCursor = (start + count) % loaded.size();
         lastPassMerged = mergedThisPass;
         totalMerged += mergedThisPass;
         lastPassComparisons = comparisonsThisPass;
+        lastPassChunks = count;
+    }
+
+    private static Cell cellFor(Item item, double radius) {
+        return new Cell(
+                (int) Math.floor(item.getLocation().getX() / radius),
+                (int) Math.floor(item.getLocation().getZ() / radius));
+    }
+
+    private static boolean samePickupRules(Item first, Item second) {
+        UUID firstOwner = first.getOwner();
+        UUID secondOwner = second.getOwner();
+        UUID firstThrower = first.getThrower();
+        UUID secondThrower = second.getThrower();
+        return Objects.equals(firstOwner, secondOwner)
+                && Objects.equals(firstThrower, secondThrower);
     }
 
     private record Cell(int x, int z) { }
@@ -168,19 +211,17 @@ public final class RastPlugin extends JavaPlugin {
             sender.sendMessage("§cУ вас нет разрешения rast.admin.");
             return true;
         }
-
         if (args.length == 0 || args[0].equalsIgnoreCase("status")) {
             sendStatus(sender);
             return true;
         }
-
         if (args[0].equalsIgnoreCase("reload")) {
             reloadConfig();
+            chunkCursor = 0;
             startMergeTask();
             sender.sendMessage("§aRast: настройки перезагружены.");
             return true;
         }
-
         sender.sendMessage("§eИспользование: /rast <status|reload>");
         return true;
     }
@@ -189,10 +230,10 @@ public final class RastPlugin extends JavaPlugin {
         int chunks = 0;
         int entities = 0;
         int itemEntities = 0;
-
         for (World world : Bukkit.getWorlds()) {
-            chunks += world.getLoadedChunks().length;
-            for (Chunk chunk : world.getLoadedChunks()) {
+            Chunk[] worldChunks = world.getLoadedChunks();
+            chunks += worldChunks.length;
+            for (Chunk chunk : worldChunks) {
                 for (Entity entity : chunk.getEntities()) {
                     entities++;
                     if (entity instanceof Item) {
@@ -204,22 +245,22 @@ public final class RastPlugin extends JavaPlugin {
 
         double[] tps = Bukkit.getServer().getTPS();
         double mspt = Bukkit.getServer().getAverageTickTime();
-
         sender.sendMessage("§6§lRast §7— диагностика сервера");
         sender.sendMessage("§7Версия: §f" + Bukkit.getBukkitVersion());
         sender.sendMessage("§7TPS (1m/5m/15m): §f" + formatTps(tps));
         sender.sendMessage("§7Средний MSPT: §f" + String.format(Locale.US, "%.2f", mspt));
         sender.sendMessage("§7Игроки: §f" + Bukkit.getOnlinePlayers().size()
-                + " §7| Чанки: §f" + chunks);
+                + " §7| Загруженные чанки: §f" + chunks);
         sender.sendMessage("§7Сущности: §f" + entities + " §7| Предметы: §f" + itemEntities);
-        sender.sendMessage("§7Объединено предметов за последний проход: §f" + lastPassMerged);
-        sender.sendMessage("§7Всего объединено: §f" + totalMerged
+        sender.sendMessage("§7Чанков обработано за проход: §f" + lastPassChunks);
+        sender.sendMessage("§7Объединено стеков за последний проход: §f" + lastPassMerged);
+        sender.sendMessage("§7Всего объединено стеков: §f" + totalMerged
                 + " §7| Проверок за проход: §f" + lastPassComparisons);
         sender.sendMessage("§7Объединение предметов: "
                 + (getConfig().getBoolean("item-merge.enabled", true) ? "§aвключено" : "§cвыключено"));
     }
 
-    private String formatTps(double[] tps) {
+    private static String formatTps(double[] tps) {
         if (tps == null || tps.length < 3) {
             return "н/д";
         }
