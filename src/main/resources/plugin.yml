@@ -4,13 +4,13 @@ main: dev.rast.RastPlugin
 api-version: '1.21'
 folia-supported: false
 authors: [sos-create]
-description: Horizon-client-only per-player chunk optimization for Paper 1.21.4.
+description: Horizon-client-only compatibility and per-player chunk optimization for Paper 1.21.4.
 commands:
   rast:
-    description: Reload Rast configuration.
-    usage: /rast reload
+    description: Manage Rast compatibility settings.
+    usage: /rast <reload|status>
     permission: rast.admin
 permissions:
   rast.admin:
-    description: Allows reloading Rast.
+    description: Allows managing Rast.
     default: op
