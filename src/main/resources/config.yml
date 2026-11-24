@@ -1,0 +1,17 @@
+# Rast 1.0.0 — Paper 1.21.4
+# Rast does not change client graphics settings or disable gameplay mechanics.
+# Item merging combines only identical stacks and never intentionally deletes items.
+
+item-merge:
+  enabled: true
+  # Maximum distance between item entities, in blocks.
+  radius: 1.25
+  # How often the merge pass runs. 20 ticks = 1 second.
+  interval-ticks: 40
+  # Safety budget: maximum candidate comparisons per loaded chunk per pass.
+  max-comparisons-per-chunk: 1200
+  # Worlds listed here are skipped.
+  disabled-worlds: []
+
+diagnostics:
+  log-startup-summary: true
