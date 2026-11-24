@@ -1,13 +1,24 @@
 # Rast — Paper 1.21.4
-# Настройки ниже применяются ТОЛЬКО к клиентам, чей brand совпадает
-# с одной из строк accepted-client-brands.
+# Настройки применяются только к клиентам с brand из accepted-client-brands.
+# Horizon отправляет brand "horizon"; это не криптографическая идентификация.
 
 horizon-optimization:
   enabled: true
   accepted-client-brands:
     - "horizon"
-  # Персональная дальность отправки и обработки чанков для Horizon-клиента.
-  # Значения ограничиваются диапазоном 2..32.
-  view-distance: 8
-  send-view-distance: 8
-  simulation-distance: 4
+
+  profiles:
+    normal:
+      view-distance: 10
+      send-view-distance: 10
+      simulation-distance: 6
+
+    # Применяется только к Horizon-клиентам при снижении TPS сервера.
+    low-tps:
+      view-distance: 6
+      send-view-distance: 6
+      simulation-distance: 3
+
+  adaptive:
+    enabled: true
+    tps-threshold: 18.0
