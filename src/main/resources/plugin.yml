@@ -1,0 +1,16 @@
+name: Rast
+version: 1.0.0
+main: dev.rast.RastPlugin
+api-version: '1.21'
+folia-supported: false
+authors: [sos-create]
+description: Safe performance utilities and diagnostics for Paper 1.21.4.
+commands:
+  rast:
+    description: Rast optimization status and configuration.
+    usage: /rast <status|reload>
+    permission: rast.admin
+permissions:
+  rast.admin:
+    description: Allows access to Rast diagnostics and reload.
+    default: op
