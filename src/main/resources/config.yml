@@ -1,13 +1,15 @@
 # Rast 1.0.0 — Paper 1.21.4
-# Safe server-side utilities. Client graphics and game mechanics are not modified.
+# Conservative server-side utilities. No forced chunk loading.
 
 item-merge:
   enabled: true
   radius: 1.25
   interval-ticks: 40
-  # Candidate comparisons are bounded separately for each processed chunk.
+  # Hard work limits for each processed chunk.
   max-comparisons-per-chunk: 1200
-  # Process only this many already-loaded chunks per pass; cursor rotates through them.
+  max-entities-per-chunk: 4096
+  max-items-per-chunk: 512
+  # Rotating cursor spreads work over multiple passes.
   max-chunks-per-pass: 32
   # Worlds listed here are skipped.
   disabled-worlds: []
