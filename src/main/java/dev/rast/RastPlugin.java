@@ -23,7 +23,7 @@ public final class RastPlugin extends JavaPlugin implements Listener {
     private static final long PERFORMANCE_CHECK_PERIOD_TICKS = 100L;
 
     private final Map<UUID, BukkitTask> brandChecks = new ConcurrentHashMap<>();
-    private final Map<UUID, AppliedProfile> appliedProfiles = new ConcurrentHashMap<>();
+    private final Map<UUID, PlayerState> horizonPlayers = new ConcurrentHashMap<>();
     private BukkitTask performanceTask;
 
     @Override
@@ -36,7 +36,7 @@ public final class RastPlugin extends JavaPlugin implements Listener {
         performanceTask = Bukkit.getScheduler().runTaskTimer(
                 this, this::refreshHorizonPlayers, PERFORMANCE_CHECK_PERIOD_TICKS,
                 PERFORMANCE_CHECK_PERIOD_TICKS);
-        getLogger().info("Rast enabled. Horizon-only adaptive chunk settings: "
+        getLogger().info("Rast enabled. Horizon-only optimization: "
                 + (isOptimizationEnabled() ? "enabled" : "disabled"));
     }
 
@@ -48,7 +48,7 @@ public final class RastPlugin extends JavaPlugin implements Listener {
             performanceTask.cancel();
             performanceTask = null;
         }
-        appliedProfiles.clear();
+        restoreAllProfiles();
     }
 
     @EventHandler
@@ -60,7 +60,7 @@ public final class RastPlugin extends JavaPlugin implements Listener {
     public void onQuit(PlayerQuitEvent event) {
         UUID id = event.getPlayer().getUniqueId();
         cancel(brandChecks.remove(id));
-        appliedProfiles.remove(id);
+        horizonPlayers.remove(id);
     }
 
     private boolean isOptimizationEnabled() {
@@ -70,7 +70,6 @@ public final class RastPlugin extends JavaPlugin implements Listener {
     private void beginBrandDetection(Player player) {
         UUID id = player.getUniqueId();
         cancel(brandChecks.remove(id));
-        appliedProfiles.remove(id);
         if (!isOptimizationEnabled()) {
             return;
         }
@@ -92,11 +91,16 @@ public final class RastPlugin extends JavaPlugin implements Listener {
                         applyCurrentProfile(player, true);
                         getLogger().info("Horizon client recognized: " + player.getName()
                                 + " (brand: " + brand + ")");
+                    } else {
+                        getLogger().fine("Non-Horizon client ignored: " + player.getName()
+                                + " (brand: " + brand + ")");
                     }
                     return;
                 }
                 if (attempts >= BRAND_CHECK_ATTEMPTS) {
                     cancel(brandChecks.remove(id));
+                    getLogger().fine("Client brand was not received for " + player.getName()
+                            + "; no per-player settings were changed.");
                 }
             }
         }, 1L, BRAND_CHECK_PERIOD_TICKS);
@@ -104,7 +108,7 @@ public final class RastPlugin extends JavaPlugin implements Listener {
     }
 
     private boolean isHorizonBrand(String brand) {
-        String normalized = brand.toLowerCase(Locale.ROOT);
+        String normalized = brand.toLowerCase(Locale.ROOT).trim();
         List<String> accepted = getConfig().getStringList(
                 "horizon-optimization.accepted-client-brands");
         for (String candidate : accepted) {
@@ -121,7 +125,7 @@ public final class RastPlugin extends JavaPlugin implements Listener {
             return;
         }
         for (Player player : Bukkit.getOnlinePlayers()) {
-            if (appliedProfiles.containsKey(player.getUniqueId())) {
+            if (horizonPlayers.containsKey(player.getUniqueId())) {
                 applyCurrentProfile(player, false);
             }
         }
@@ -131,22 +135,46 @@ public final class RastPlugin extends JavaPlugin implements Listener {
         if (!player.isOnline() || !isOptimizationEnabled()) {
             return;
         }
+
+        UUID id = player.getUniqueId();
         boolean underLoad = isAdaptiveModeEnabled() && isServerUnderLoad();
         String profileName = underLoad ? "low-tps" : "normal";
         AppliedProfile profile = readProfile(profileName);
-        UUID id = player.getUniqueId();
+        PlayerState state = horizonPlayers.get(id);
 
-        if (!force && profile.equals(appliedProfiles.get(id))) {
+        if (state == null) {
+            PlayerSettings original = new PlayerSettings(
+                    player.getViewDistance(),
+                    player.getSendViewDistance(),
+                    player.getSimulationDistance());
+            state = new PlayerState(original, null);
+        } else if (!force && profile.equals(state.applied())) {
             return;
         }
+
         player.setViewDistance(profile.viewDistance());
         player.setSendViewDistance(profile.sendViewDistance());
         player.setSimulationDistance(profile.simulationDistance());
-        appliedProfiles.put(id, profile);
+        horizonPlayers.put(id, new PlayerState(state.original(), profile));
+
         if (force) {
             getLogger().fine("Applied " + profileName + " Horizon chunk profile to "
                     + player.getName() + ".");
         }
+    }
+
+    private void restoreAllProfiles() {
+        for (Map.Entry<UUID, PlayerState> entry : horizonPlayers.entrySet()) {
+            Player player = Bukkit.getPlayer(entry.getKey());
+            if (player == null || !player.isOnline()) {
+                continue;
+            }
+            PlayerSettings original = entry.getValue().original();
+            player.setViewDistance(original.viewDistance());
+            player.setSendViewDistance(original.sendViewDistance());
+            player.setSimulationDistance(original.simulationDistance());
+        }
+        horizonPlayers.clear();
     }
 
     private boolean isAdaptiveModeEnabled() {
@@ -188,18 +216,32 @@ public final class RastPlugin extends JavaPlugin implements Listener {
             return true;
         }
         if (args.length == 1 && args[0].equalsIgnoreCase("reload")) {
+            restoreAllProfiles();
             reloadConfig();
-            appliedProfiles.clear();
             for (Player player : Bukkit.getOnlinePlayers()) {
                 beginBrandDetection(player);
             }
             sender.sendMessage("§aRast: настройки перечитаны; Horizon-клиенты будут перенастроены.");
             return true;
         }
-        sender.sendMessage("§eИспользование: /rast reload");
+        if (args.length == 1 && args[0].equalsIgnoreCase("status")) {
+            sender.sendMessage("§6Rast §7| §fHorizon-профили: "
+                    + (isOptimizationEnabled() ? "§aвключены" : "§cвыключены")
+                    + " §7| §fраспознано игроков: §b" + horizonPlayers.size());
+            sender.sendMessage("§7TPS (1 мин): §f" + String.format(Locale.ROOT, "%.2f",
+                    Bukkit.getTPS()[0]));
+            return true;
+        }
+        sender.sendMessage("§eИспользование: /rast reload §7или §e/rast status");
         return true;
     }
 
     private record AppliedProfile(int viewDistance, int sendViewDistance, int simulationDistance) {
+    }
+
+    private record PlayerSettings(int viewDistance, int sendViewDistance, int simulationDistance) {
+    }
+
+    private record PlayerState(PlayerSettings original, AppliedProfile applied) {
     }
 }
