@@ -118,6 +118,7 @@ public final class RastPlugin extends JavaPlugin {
                 }
                 Cell cell = cellFor(source, radius);
 
+                neighborCells:
                 for (int dx = -1; dx <= 1; dx++) {
                     for (int dz = -1; dz <= 1; dz++) {
                         List<Item> nearby = cells.get(new Cell(cell.x + dx, cell.z + dz));
@@ -170,7 +171,7 @@ public final class RastPlugin extends JavaPlugin {
                             if (sourceStack.getAmount() <= 0) {
                                 source.remove();
                                 mergedThisPass++;
-                                break;
+                                break neighborCells;
                             } else {
                                 source.setItemStack(sourceStack);
                             }
