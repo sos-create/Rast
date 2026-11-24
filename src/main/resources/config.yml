@@ -1,6 +1,6 @@
 # Rast — Paper 1.21.4
-# Настройки применяются только к клиентам с brand из accepted-client-brands.
-# Horizon отправляет brand "horizon"; это не криптографическая идентификация.
+# Изменения применяются только к клиентам с brand из accepted-client-brands.
+# Brand сообщает сам клиент, поэтому это фильтр совместимости, а не защита от подмены.
 
 horizon-optimization:
   enabled: true
@@ -13,7 +13,7 @@ horizon-optimization:
       send-view-distance: 10
       simulation-distance: 6
 
-    # Применяется только к Horizon-клиентам при снижении TPS сервера.
+    # Пониженная нагрузка: меньше отправляемых и тикающих чанков.
     low-tps:
       view-distance: 6
       send-view-distance: 6
@@ -21,4 +21,10 @@ horizon-optimization:
 
   adaptive:
     enabled: true
+    # Включить сниженный профиль, если средний TPS ниже порога.
     tps-threshold: 18.0
+    # Или если занято не менее указанной доли максимальной heap-памяти JVM.
+    max-heap-usage: 0.88
+    # Сколько последовательных проверок нужно для переключения профиля.
+    # Проверка выполняется раз в 5 секунд; 3 = около 15 секунд устойчивой нагрузки.
+    stable-checks: 3
