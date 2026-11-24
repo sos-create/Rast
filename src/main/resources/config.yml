@@ -1,18 +1,13 @@
-# Rast 1.0.0 — Paper 1.21.4
-# Conservative server-side utilities. No forced chunk loading.
+# Rast — Paper 1.21.4
+# Настройки ниже применяются ТОЛЬКО к клиентам, чей brand совпадает
+# с одной из строк accepted-client-brands.
 
-item-merge:
+horizon-optimization:
   enabled: true
-  radius: 1.25
-  interval-ticks: 40
-  # Hard work limits for each processed chunk.
-  max-comparisons-per-chunk: 1200
-  max-entities-per-chunk: 4096
-  max-items-per-chunk: 512
-  # Rotating cursor spreads work over multiple passes.
-  max-chunks-per-pass: 32
-  # Worlds listed here are skipped.
-  disabled-worlds: []
-
-diagnostics:
-  log-startup-summary: true
+  accepted-client-brands:
+    - "horizon"
+  # Персональная дальность отправки и обработки чанков для Horizon-клиента.
+  # Значения ограничиваются диапазоном 2..32.
+  view-distance: 8
+  send-view-distance: 8
+  simulation-distance: 4
