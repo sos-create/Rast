@@ -163,6 +163,9 @@ public final class RastPlugin extends JavaPlugin {
 
                             int delay = Math.max(source.getPickupDelay(), target.getPickupDelay());
                             target.setPickupDelay(delay);
+                            if (source.willAge() && target.willAge()) {
+                                target.setTicksLived(Math.max(source.getTicksLived(), target.getTicksLived()));
+                            }
 
                             if (sourceStack.getAmount() <= 0) {
                                 source.remove();
@@ -197,7 +200,12 @@ public final class RastPlugin extends JavaPlugin {
         UUID firstThrower = first.getThrower();
         UUID secondThrower = second.getThrower();
         return Objects.equals(firstOwner, secondOwner)
-                && Objects.equals(firstThrower, secondThrower);
+                && Objects.equals(firstThrower, secondThrower)
+                && first.canPlayerPickup() == second.canPlayerPickup()
+                && first.canMobPickup() == second.canMobPickup()
+                && first.willAge() == second.willAge()
+                && first.isUnlimitedLifetime() == second.isUnlimitedLifetime()
+                && first.getHealth() == second.getHealth();
     }
 
     private record Cell(int x, int z) { }
