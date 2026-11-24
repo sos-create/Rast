@@ -4,13 +4,13 @@ main: dev.rast.RastPlugin
 api-version: '1.21'
 folia-supported: false
 authors: [sos-create]
-description: Safe performance utilities and diagnostics for Paper 1.21.4.
+description: Horizon-client-only per-player chunk optimization for Paper 1.21.4.
 commands:
   rast:
-    description: Rast optimization status and configuration.
-    usage: /rast <status|reload>
+    description: Reload Rast configuration.
+    usage: /rast reload
     permission: rast.admin
 permissions:
   rast.admin:
-    description: Allows access to Rast diagnostics and reload.
+    description: Allows reloading Rast.
     default: op
