@@ -7,9 +7,9 @@ import org.bukkit.command.Command;
 import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Entity;
 import org.bukkit.entity.Item;
+import org.bukkit.inventory.ItemStack;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.scheduler.BukkitTask;
-import org.bukkit.inventory.ItemStack;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -17,16 +17,21 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
-import java.util.Objects;
+import java.util.logging.Level;
 
 public final class RastPlugin extends JavaPlugin {
     private BukkitTask mergeTask;
     private long totalMerged;
+    private long totalTransfers;
     private long lastPassMerged;
+    private long lastPassTransfers;
+    private long lastPassDurationMs;
     private int lastPassComparisons;
     private int lastPassChunks;
+    private int consecutiveTaskFailures;
     private int chunkCursor;
 
     @Override
@@ -41,6 +46,10 @@ public final class RastPlugin extends JavaPlugin {
 
     @Override
     public void onDisable() {
+        stopMergeTask();
+    }
+
+    private void stopMergeTask() {
         if (mergeTask != null) {
             mergeTask.cancel();
             mergeTask = null;
@@ -48,41 +57,62 @@ public final class RastPlugin extends JavaPlugin {
     }
 
     private void startMergeTask() {
-        if (mergeTask != null) {
-            mergeTask.cancel();
-            mergeTask = null;
-        }
+        stopMergeTask();
+        consecutiveTaskFailures = 0;
         if (!getConfig().getBoolean("item-merge.enabled", true)) {
             return;
         }
-        long interval = Math.max(20L, getConfig().getLong("item-merge.interval-ticks", 40L));
-        mergeTask = Bukkit.getScheduler().runTaskTimer(this, this::mergeLoadedItems, interval, interval);
+        long interval = Math.max(20L, Math.min(1200L,
+                getConfig().getLong("item-merge.interval-ticks", 40L)));
+        mergeTask = Bukkit.getScheduler().runTaskTimer(this, this::runMergeTaskSafely, interval, interval);
+    }
+
+    private void runMergeTaskSafely() {
+        try {
+            mergeLoadedItems();
+            consecutiveTaskFailures = 0;
+        } catch (RuntimeException exception) {
+            consecutiveTaskFailures++;
+            getLogger().log(Level.SEVERE, "Item merge pass failed ("
+                    + consecutiveTaskFailures + "/3). The next pass will retry.", exception);
+            if (consecutiveTaskFailures >= 3) {
+                stopMergeTask();
+                getLogger().severe("Item merging was paused after 3 consecutive failures. "
+                        + "Other server functions remain available; fix the error and run /rast reload.");
+            }
+        }
     }
 
     private void mergeLoadedItems() {
+        long started = System.nanoTime();
         double radius = Math.max(0.5, Math.min(4.0,
                 getConfig().getDouble("item-merge.radius", 1.25)));
         double radiusSquared = radius * radius;
         int comparisonBudget = Math.max(100, getConfig().getInt(
                 "item-merge.max-comparisons-per-chunk", 1200));
         int chunkBudget = Math.max(1, getConfig().getInt("item-merge.max-chunks-per-pass", 32));
+        int entityScanBudget = Math.max(128, getConfig().getInt(
+                "item-merge.max-entities-per-chunk", 4096));
+        int itemBudget = Math.max(16, getConfig().getInt(
+                "item-merge.max-items-per-chunk", 512));
         Set<String> disabledWorlds = new HashSet<>(
                 getConfig().getStringList("item-merge.disabled-worlds"));
 
         List<Chunk> loaded = new ArrayList<>();
         for (World world : Bukkit.getWorlds()) {
-            if (disabledWorlds.contains(world.getName())) {
-                continue;
-            }
-            for (Chunk chunk : world.getLoadedChunks()) {
-                loaded.add(chunk);
+            if (!disabledWorlds.contains(world.getName())) {
+                for (Chunk chunk : world.getLoadedChunks()) {
+                    loaded.add(chunk);
+                }
             }
         }
 
         if (loaded.isEmpty()) {
             lastPassMerged = 0;
+            lastPassTransfers = 0;
             lastPassComparisons = 0;
             lastPassChunks = 0;
+            lastPassDurationMs = (System.nanoTime() - started) / 1_000_000L;
             chunkCursor = 0;
             return;
         }
@@ -90,12 +120,18 @@ public final class RastPlugin extends JavaPlugin {
         int start = Math.floorMod(chunkCursor, loaded.size());
         int count = Math.min(chunkBudget, loaded.size());
         long mergedThisPass = 0;
+        long transfersThisPass = 0;
         int comparisonsThisPass = 0;
 
         for (int offset = 0; offset < count; offset++) {
             Chunk chunk = loaded.get((start + offset) % loaded.size());
             List<Item> items = new ArrayList<>();
-            for (Entity entity : chunk.getEntities()) {
+            Entity[] entities = chunk.getEntities();
+            int scanned = 0;
+            for (Entity entity : entities) {
+                if (++scanned > entityScanBudget || items.size() >= itemBudget) {
+                    break;
+                }
                 if (entity instanceof Item item && item.isValid() && !item.isDead()) {
                     items.add(item);
                 }
@@ -106,14 +142,16 @@ public final class RastPlugin extends JavaPlugin {
 
             Map<Cell, List<Item>> cells = new HashMap<>();
             for (Item item : items) {
-                Cell cell = cellFor(item, radius);
-                cells.computeIfAbsent(cell, ignored -> new ArrayList<>()).add(item);
+                if (isMergeEligible(item)) {
+                    Cell cell = cellFor(item, radius);
+                    cells.computeIfAbsent(cell, ignored -> new ArrayList<>()).add(item);
+                }
             }
 
             int comparisons = 0;
             outer:
             for (Item source : items) {
-                if (!source.isValid() || source.isDead()) {
+                if (!isMergeEligible(source)) {
                     continue;
                 }
                 Cell cell = cellFor(source, radius);
@@ -127,7 +165,7 @@ public final class RastPlugin extends JavaPlugin {
                         }
 
                         for (Item target : nearby) {
-                            if (source == target || !target.isValid() || target.isDead()
+                            if (source == target || !isMergeEligible(target)
                                     || source.getEntityId() >= target.getEntityId()) {
                                 continue;
                             }
@@ -149,10 +187,6 @@ public final class RastPlugin extends JavaPlugin {
                             }
 
                             int capacity = targetStack.getMaxStackSize() - targetStack.getAmount();
-                            if (capacity <= 0) {
-                                continue;
-                            }
-
                             int moved = Math.min(capacity, sourceStack.getAmount());
                             if (moved <= 0) {
                                 continue;
@@ -161,9 +195,9 @@ public final class RastPlugin extends JavaPlugin {
                             targetStack.setAmount(targetStack.getAmount() + moved);
                             target.setItemStack(targetStack);
                             sourceStack.setAmount(sourceStack.getAmount() - moved);
+                            transfersThisPass++;
 
-                            int delay = Math.max(source.getPickupDelay(), target.getPickupDelay());
-                            target.setPickupDelay(delay);
+                            target.setPickupDelay(Math.max(source.getPickupDelay(), target.getPickupDelay()));
                             if (source.willAge() && target.willAge()) {
                                 target.setTicksLived(Math.max(source.getTicksLived(), target.getTicksLived()));
                             }
@@ -172,9 +206,8 @@ public final class RastPlugin extends JavaPlugin {
                                 source.remove();
                                 mergedThisPass++;
                                 break neighborCells;
-                            } else {
-                                source.setItemStack(sourceStack);
                             }
+                            source.setItemStack(sourceStack);
                         }
                     }
                 }
@@ -184,9 +217,17 @@ public final class RastPlugin extends JavaPlugin {
 
         chunkCursor = (start + count) % loaded.size();
         lastPassMerged = mergedThisPass;
+        lastPassTransfers = transfersThisPass;
         totalMerged += mergedThisPass;
+        totalTransfers += transfersThisPass;
         lastPassComparisons = comparisonsThisPass;
         lastPassChunks = count;
+        lastPassDurationMs = (System.nanoTime() - started) / 1_000_000L;
+    }
+
+    private static boolean isMergeEligible(Item item) {
+        return item.isValid() && !item.isDead()
+                && item.getPersistentDataContainer().getKeys().isEmpty();
     }
 
     private static Cell cellFor(Item item, double radius) {
@@ -202,6 +243,7 @@ public final class RastPlugin extends JavaPlugin {
         UUID secondThrower = second.getThrower();
         return Objects.equals(firstOwner, secondOwner)
                 && Objects.equals(firstThrower, secondThrower)
+                && first.getScoreboardTags().equals(second.getScoreboardTags())
                 && first.canPlayerPickup() == second.canPlayerPickup()
                 && first.canMobPickup() == second.canMobPickup()
                 && first.willAge() == second.willAge()
@@ -261,12 +303,16 @@ public final class RastPlugin extends JavaPlugin {
         sender.sendMessage("§7Игроки: §f" + Bukkit.getOnlinePlayers().size()
                 + " §7| Загруженные чанки: §f" + chunks);
         sender.sendMessage("§7Сущности: §f" + entities + " §7| Предметы: §f" + itemEntities);
-        sender.sendMessage("§7Чанков обработано за проход: §f" + lastPassChunks);
-        sender.sendMessage("§7Объединено стеков за последний проход: §f" + lastPassMerged);
-        sender.sendMessage("§7Всего объединено стеков: §f" + totalMerged
-                + " §7| Проверок за проход: §f" + lastPassComparisons);
+        sender.sendMessage("§7Последний проход: §f" + lastPassDurationMs + " мс"
+                + " §7| чанков: §f" + lastPassChunks);
+        sender.sendMessage("§7Переносов предметов: §f" + lastPassTransfers
+                + " §7| удалено исходных сущностей: §f" + lastPassMerged);
+        sender.sendMessage("§7Всего переносов: §f" + totalTransfers
+                + " §7| всего удалено сущностей: §f" + totalMerged
+                + " §7| сравнений: §f" + lastPassComparisons);
         sender.sendMessage("§7Объединение предметов: "
                 + (getConfig().getBoolean("item-merge.enabled", true) ? "§aвключено" : "§cвыключено"));
+        sender.sendMessage("§7Ошибок фоновой задачи подряд: §f" + consecutiveTaskFailures);
     }
 
     private static String formatTps(double[] tps) {
