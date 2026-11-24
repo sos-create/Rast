@@ -1,33 +1,36 @@
 # Rast
 
-Rast is a Paper 1.21.4 plugin for Horizon clients. It does not alter the settings of ordinary Java clients.
+Rast is a Paper 1.21.4 plugin that applies per-player chunk and simulation settings only to clients whose reported brand matches the configured Horizon brand. Ordinary Java clients are left unchanged.
 
 ## Horizon compatibility
 
-The current Horizon native client identifies itself with the client brand "horizon". Rast reads the brand supplied by the client and applies settings only to matching players. This is a convenience filter, not authentication: a modified client can spoof its brand.
+The Horizon native client has a built-in older-server adapter. Its current documentation lists Java 1.21.4 as a recognized server version; the adapter is enabled by default. Set `HORIZON_OLDER_SERVERS=0` before launching Horizon only if you need to turn that adapter off.
 
-Horizon’s connection to older Java servers is still experimental. For a Paper 1.21.4 server, the Horizon client must have its older-server adapter enabled with HORIZON_OLDER_SERVERS=1 before starting the game. Rast does not replace that protocol adapter and cannot repair packet translations that Horizon itself does not yet support.
+Rast does not implement the Horizon wire protocol. Horizon itself translates protocol packets and registry IDs between its native game version and the older Java server. A Paper plugin cannot replace that Rust-side adapter or guarantee support for packet layouts, items, entities, or interactions that Horizon has not implemented.
 
-## What Rast optimizes
+## What Rast does
 
-- Applies personal Paper view distance, chunk send distance, and simulation distance to Horizon players only.
-- Rechecks the profile every five seconds.
-- Uses a normal profile while the server is healthy.
-- When the server's one-minute TPS falls below the configured threshold, switches only Horizon players to a lower chunk/simulation profile. Ordinary Java players are not modified.
-- Re-evaluates the profile automatically as TPS recovers.
-- /rast reload reloads the configuration and re-detects online players.
+- Detects the reported client brand after login. The default accepted brand is `horizon`; matching is case-insensitive and configurable.
+- Applies personal Paper view distance, chunk send distance, and simulation distance only to recognized Horizon players.
+- Rechecks the server's one-minute TPS every five seconds.
+- Uses the configured normal profile while healthy and the low-TPS profile under load; returns to normal automatically after recovery.
+- Remembers each Horizon player's original per-player distances and restores them on plugin disable or `/rast reload`.
+- Ignores ordinary Java clients and clients whose brand was not received.
+- `/rast status` shows whether optimization is enabled and how many Horizon players are currently recognized.
+- `/rast reload` reloads configuration, restores previous settings, and re-detects online players.
 
-This is adaptive per-player chunk delivery and simulation tuning, not a rewrite of Paper's chunk generator, networking stack, or Horizon's Rust protocol adapter. Bukkit/Paper does not expose a supported API for replacing Horizon's custom chunk wire format or injecting new block-registry translations.
+The brand is client-reported and can be spoofed; it is a compatibility selector, not authentication. This is per-player chunk delivery/simulation tuning, not a rewrite of Paper's chunk engine or a universal block/packet translator.
 
 ## Configuration
 
-Edit plugins/Rast/config.yml:
+Edit `plugins/Rast/config.yml`:
 
-- accepted-client-brands: brand substrings accepted as Horizon.
-- profiles.normal: normal personal distances.
-- profiles.low-tps: reduced distances used under server load.
-- adaptive.tps-threshold: one-minute TPS threshold for the reduced profile.
-- adaptive.enabled: enable or disable automatic profile switching.
+- `accepted-client-brands`: case-insensitive substrings used to recognize Horizon.
+- `profiles.normal`: normal per-player distances.
+- `profiles.low-tps`: reduced distances used under server load.
+- `adaptive.tps-threshold`: one-minute TPS threshold for switching to the reduced profile.
+- `adaptive.enabled`: enable or disable automatic profile switching.
+- `horizon-optimization.enabled`: master switch.
 
 All distance values are clamped to 2..32.
 
@@ -37,4 +40,4 @@ Requires JDK 21 and Maven 3.9+.
 
     mvn --batch-mode clean verify
 
-Output: target/Rast-1.0.0.jar. GitHub Actions builds and uploads the JAR.
+Output: `target/Rast-1.0.0.jar`. GitHub Actions builds and uploads the JAR.
